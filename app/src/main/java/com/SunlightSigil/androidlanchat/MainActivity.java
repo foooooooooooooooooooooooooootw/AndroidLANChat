@@ -27,9 +27,11 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.util.Arrays;
+import java.util.Enumeration;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -47,6 +49,7 @@ public class MainActivity extends AppCompatActivity {
     private FloatingActionButton fabFile;
     private Handler mainHandler;
     private LinearLayout chatLayout;
+    private String localIpAddress;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -79,13 +82,31 @@ public class MainActivity extends AppCompatActivity {
         fabImage.setOnClickListener(v -> chooseImage());
         fabFile.setOnClickListener(v -> chooseFile());
 
+        localIpAddress = getLocalIpAddress();
+
         checkPermissions();
+    }
+
+    private String getLocalIpAddress() {
+        try {
+            for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements();) {
+                NetworkInterface networkInterface = en.nextElement();
+                for (Enumeration<InetAddress> enumIpAddr = networkInterface.getInetAddresses(); enumIpAddr.hasMoreElements();) {
+                    InetAddress inetAddress = enumIpAddr.nextElement();
+                    if (!inetAddress.isLoopbackAddress() && inetAddress.isSiteLocalAddress()) {
+                        return inetAddress.getHostAddress();
+                    }
+                }
+            }
+        } catch (SocketException ex) {
+            Log.e("UDP", "Error getting IP address", ex);
+        }
+        return null;
     }
 
     private void receiveMessages() {
         new Thread(() -> {
             try {
-                // Bind to all available network interfaces
                 receiveSocket = new DatagramSocket(PORT, InetAddress.getByName("0.0.0.0"));
                 receiveSocket.setBroadcast(true);
                 byte[] buffer = new byte[MAX_UDP_SIZE];
@@ -98,12 +119,19 @@ public class MainActivity extends AppCompatActivity {
                         receiveSocket.receive(packet);
                         int length = packet.getLength();
                         Log.d("UDP_RECEIVE", "Received packet of length: " + length);
+
+                        InetAddress sourceAddress = packet.getAddress();
+                        if (sourceAddress.getHostAddress().equals(localIpAddress)) {
+                            // Ignore messages from our own IP address
+                            continue;
+                        }
+
                         byte[] receivedData = Arrays.copyOf(packet.getData(), length);
                         String message = new String(receivedData, 0, length);
 
                         Log.d("UDP_RECEIVE", "Received Data: " + message);
                         mainHandler.post(() -> {
-                            chatLayout.addView(createChatBubble(message, true));
+                            appendMessage(message, true, sourceAddress.getHostAddress());
                             ScrollView scrollView = findViewById(R.id.chat_scroll_view);
                             scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
                         });
@@ -122,15 +150,20 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
+
+
+
     private void sendMessage() {
         String message = messageInput.getText().toString();
         if (!message.isEmpty()) {
+            final String outgoingMessage = message;  // Directly use the message
+
             new Thread(() -> {
                 try {
-                    DatagramPacket packet = new DatagramPacket(message.getBytes(), message.length(), broadcastAddress, PORT);
+                    DatagramPacket packet = new DatagramPacket(outgoingMessage.getBytes(), outgoingMessage.length(), broadcastAddress, PORT);
                     udpSocket.send(packet);
                     runOnUiThread(() -> {
-                        appendMessage("You: " + message, false);
+                        appendMessage(message, false, localIpAddress + " (You)");
                         messageInput.setText("");
                     });
                 } catch (IOException e) {
@@ -143,11 +176,17 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private View createChatBubble(String message, boolean isIncoming) {
+
+
+    private View createChatBubble(String message, boolean isIncoming, String senderIp) {
         LayoutInflater inflater = LayoutInflater.from(this);
         View chatBubble = inflater.inflate(R.layout.chat_bubble, null);
 
         TextView messageText = chatBubble.findViewById(R.id.message_text);
+        TextView senderText = chatBubble.findViewById(R.id.sender_text);  // Add this in your layout
+
+        // Set sender IP and message text
+        senderText.setText(isIncoming ? senderIp : "You: " + message);
         messageText.setText(message);
 
         if (isIncoming) {
@@ -216,7 +255,8 @@ public class MainActivity extends AppCompatActivity {
                     sequenceNumber++;
                 }
                 fis.close();
-                runOnUiThread(() -> appendMessage("You sent a " + fileType + ": " + uri.getLastPathSegment(), false));
+                runOnUiThread(() -> appendMessage(fileType + ": " + uri.getLastPathSegment(), false, localIpAddress + " (You)"));
+
             } catch (IOException e) {
                 e.printStackTrace();
                 runOnUiThread(() ->
@@ -226,7 +266,7 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    private void appendMessage(String message, boolean isIncoming) {
+    private void appendMessage(String message, boolean isIncoming, String senderIp) {
         runOnUiThread(() -> {
             TextView messageView = new TextView(MainActivity.this);
             messageView.setText(message);
@@ -237,12 +277,29 @@ public class MainActivity extends AppCompatActivity {
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
             ));
-            chatLayout.addView(messageView);
+
+            // Create a parent LinearLayout for the sender IP and message
+            LinearLayout messageContainer = new LinearLayout(MainActivity.this);
+            messageContainer.setOrientation(LinearLayout.VERTICAL);
+            messageContainer.addView(createSenderTextView(senderIp));
+            messageContainer.addView(messageView);
+
+            chatLayout.addView(messageContainer);
 
             ScrollView scrollView = findViewById(R.id.chat_scroll_view);
             scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
         });
     }
+
+    private TextView createSenderTextView(String senderIp) {
+        TextView senderTextView = new TextView(MainActivity.this);
+        senderTextView.setText(senderIp);
+        senderTextView.setTextColor(Color.DKGRAY);
+        senderTextView.setTextSize(12);
+        senderTextView.setPadding(0, 0, 0, 4);  // Padding below sender IP
+        return senderTextView;
+    }
+
 
     private void checkPermissions() {
         if (checkSelfPermission(Manifest.permission.INTERNET) != PackageManager.PERMISSION_GRANTED) {
