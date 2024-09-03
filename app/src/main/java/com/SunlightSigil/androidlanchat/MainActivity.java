@@ -26,18 +26,20 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.util.Arrays;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final int PORT = 12345;
-    private static final int CHUNK_SIZE = 64000; // Size in bytes
-    private static final int FILE_CHUNK_HEADER_SIZE = 1; // Size for the sequence number
+    private static final int CHUNK_SIZE = 64000;
+    private static final int FILE_CHUNK_HEADER_SIZE = 1;
     private static final int MAX_UDP_SIZE = CHUNK_SIZE + FILE_CHUNK_HEADER_SIZE;
     private DatagramSocket udpSocket;
     private DatagramSocket receiveSocket;
-    private InetAddress serverAddress;
+    private InetAddress broadcastAddress;
     private EditText messageInput;
     private Button sendButton;
     private FloatingActionButton fabAdd;
@@ -63,41 +65,16 @@ public class MainActivity extends AppCompatActivity {
 
         try {
             udpSocket = new DatagramSocket();
-            serverAddress = InetAddress.getByName("192.168.1.255"); // Adjust to correct IP
-        } catch (SocketException e) {
-            // Handle SocketException specifically
+            broadcastAddress = InetAddress.getByName("192.168.1.255");
+        } catch (SocketException | UnknownHostException e) {
             e.printStackTrace();
-        } catch (IOException e) {
-            // Handle IOException (including SocketException) specifically
-            e.printStackTrace();
+            Toast.makeText(MainActivity.this, "Socket Initialization Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
 
         // Start thread to receive messages
-        new Thread(() -> {
-            try {
-                receiveSocket = new DatagramSocket(PORT);
-                byte[] buffer = new byte[MAX_UDP_SIZE];
-                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-
-                while (true) {
-                    receiveSocket.receive(packet);
-                    String receivedData = new String(packet.getData(), 0, packet.getLength());
-                    Log.d("UDP_RECEIVE", "Received Data: " + receivedData); // Debug log
-                    mainHandler.post(() -> {
-                        // Update UI with received message
-                        chatLayout.addView(createChatBubble(receivedData, true));
-                        ScrollView scrollView = findViewById(R.id.chat_scroll_view);
-                        scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
-                    });
-                }
-            } catch (IOException e) {
-                e.printStackTrace();
-                mainHandler.post(() -> Toast.makeText(MainActivity.this, "Receive Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
-            }
-        }).start();
+        new Thread(this::receiveMessages).start();
 
         sendButton.setOnClickListener(v -> sendMessage());
-
         fabAdd.setOnClickListener(v -> toggleFabMenu());
         fabImage.setOnClickListener(v -> chooseImage());
         fabFile.setOnClickListener(v -> chooseFile());
@@ -105,12 +82,52 @@ public class MainActivity extends AppCompatActivity {
         checkPermissions();
     }
 
+    private void receiveMessages() {
+        new Thread(() -> {
+            try {
+                // Bind to all available network interfaces
+                receiveSocket = new DatagramSocket(PORT, InetAddress.getByName("0.0.0.0"));
+                receiveSocket.setBroadcast(true);
+                byte[] buffer = new byte[MAX_UDP_SIZE];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+
+                Log.d("UDP_RECEIVE", "Listening for incoming messages on port " + PORT);
+
+                while (true) {
+                    try {
+                        receiveSocket.receive(packet);
+                        int length = packet.getLength();
+                        Log.d("UDP_RECEIVE", "Received packet of length: " + length);
+                        byte[] receivedData = Arrays.copyOf(packet.getData(), length);
+                        String message = new String(receivedData, 0, length);
+
+                        Log.d("UDP_RECEIVE", "Received Data: " + message);
+                        mainHandler.post(() -> {
+                            chatLayout.addView(createChatBubble(message, true));
+                            ScrollView scrollView = findViewById(R.id.chat_scroll_view);
+                            scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
+                        });
+                    } catch (IOException e) {
+                        Log.e("UDP_RECEIVE", "Receive Error: " + e.getMessage(), e);
+                    }
+                }
+            } catch (IOException e) {
+                Log.e("UDP_RECEIVE", "Socket Error: " + e.getMessage(), e);
+                mainHandler.post(() -> Toast.makeText(MainActivity.this, "Socket Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            } finally {
+                if (receiveSocket != null && !receiveSocket.isClosed()) {
+                    receiveSocket.close();
+                }
+            }
+        }).start();
+    }
+
     private void sendMessage() {
         String message = messageInput.getText().toString();
         if (!message.isEmpty()) {
             new Thread(() -> {
                 try {
-                    DatagramPacket packet = new DatagramPacket(message.getBytes(), message.length(), serverAddress, PORT);
+                    DatagramPacket packet = new DatagramPacket(message.getBytes(), message.length(), broadcastAddress, PORT);
                     udpSocket.send(packet);
                     runOnUiThread(() -> {
                         appendMessage("You: " + message, false);
@@ -194,7 +211,7 @@ public class MainActivity extends AppCompatActivity {
                     packetStream.write(sequenceNumber);
                     packetStream.write(chunk);
                     byte[] packetData = packetStream.toByteArray();
-                    DatagramPacket packet = new DatagramPacket(packetData, packetData.length, serverAddress, PORT);
+                    DatagramPacket packet = new DatagramPacket(packetData, packetData.length, broadcastAddress, PORT);
                     udpSocket.send(packet);
                     sequenceNumber++;
                 }
@@ -211,7 +228,6 @@ public class MainActivity extends AppCompatActivity {
 
     private void appendMessage(String message, boolean isIncoming) {
         runOnUiThread(() -> {
-            // Create a new TextView for the message
             TextView messageView = new TextView(MainActivity.this);
             messageView.setText(message);
             messageView.setPadding(16, 8, 16, 8);
@@ -221,11 +237,8 @@ public class MainActivity extends AppCompatActivity {
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
             ));
-
-            // Add the TextView to the LinearLayout
             chatLayout.addView(messageView);
 
-            // Scroll to the bottom
             ScrollView scrollView = findViewById(R.id.chat_scroll_view);
             scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
         });
@@ -237,8 +250,11 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private boolean isEndOfFile(byte[] chunk) {
-        // Implement logic to determine if the chunk signifies the end of the file
-        return chunk.length == 0; // Example condition
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (receiveSocket != null && !receiveSocket.isClosed()) {
+            receiveSocket.close();
+        }
     }
 }
